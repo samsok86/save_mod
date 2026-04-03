@@ -6,6 +6,7 @@ from collections import OrderedDict
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message, BusinessMessagesDeleted, BusinessConnection
 from aiogram.filters import Command
+from aiogram.exceptions import TelegramRetryAfter
 from fun import cmd_spam, cmd_stop, cmd_fuck, get_like_suffix
 
 logging.basicConfig(level=logging.INFO)
@@ -23,9 +24,8 @@ bot = Bot(token=TOKEN2)
 dp = Dispatcher()
 
 MAX_CACHE_PER_CHAT = 100
-CACHE_TTL_SECONDS = 7 * 24 * 3600  # 7 дней
+CACHE_TTL_SECONDS = 7 * 24 * 3600
 
-# cache: {chat_id: OrderedDict[msg_id -> (Message, timestamp)]}
 cache: dict[int, OrderedDict] = {}
 
 connected_users: dict[int, dict] = {}
@@ -33,9 +33,7 @@ connection_owners: dict[str, int] = {}
 banned_users: set[int] = set()
 stats: dict[str, int] = {"deleted": 0, "edited": 0, "connections": 0}
 
-# like mode: множество (owner_id, chat_id)
-like_mode_chats: set[tuple[int, int]] = set()
-# сообщения, отредактированные ботом через /like — пропускаем в handle_edited
+like_mode_chats: set[int] = set()
 like_edited_messages: set[tuple[int, int]] = set()
 
 
@@ -62,7 +60,6 @@ def save_to_cache(message: Message):
     if cid not in cache:
         cache[cid] = OrderedDict()
     cache[cid][message.message_id] = (message, time.time())
-    # Держим не более 100 сообщений на чат
     while len(cache[cid]) > MAX_CACHE_PER_CHAT:
         cache[cid].popitem(last=False)
 
@@ -229,7 +226,7 @@ async def handle_business_message(message: Message):
     sender_id = message.from_user.id if message.from_user else None
     cmd = get_command(message.text or "")
 
-    if cmd in ("spam", "fuck", "stop", "like"):
+    if cmd in ("spam", "fuck", "stop", "like", "nolike"):
         if sender_id != owner_id:
             save_to_cache(message)
             return
@@ -240,36 +237,50 @@ async def handle_business_message(message: Message):
         elif cmd == "stop":
             await cmd_stop(message, bot)
         elif cmd == "like":
-            key = (owner_id, message.chat.id)
+            chat_id = message.chat.id
             try:
                 await bot.delete_messages(
-                    chat_id=message.chat.id,
+                    chat_id=chat_id,
                     message_ids=[message.message_id],
                     business_connection_id=message.business_connection_id,
                 )
             except Exception as e:
                 logging.warning(f"Не удалось удалить /like: {e}")
-            if key in like_mode_chats:
-                like_mode_chats.discard(key)
-                text = '<tg-emoji emoji-id="5249009601231224691">❤</tg-emoji>|режим лайкера выключен'
-            else:
-                like_mode_chats.add(key)
-                text = '<tg-emoji emoji-id="5249009601231224691">❤</tg-emoji>|режим лайкера активирован.'
+            like_mode_chats.add(chat_id)
             try:
                 await bot.send_message(
-                    message.chat.id,
-                    text,
+                    chat_id,
+                    '<tg-emoji emoji-id="5249009601231224691">❤</tg-emoji>|режим лайкера активирован.',
                     parse_mode="HTML",
                     business_connection_id=message.business_connection_id,
                 )
             except Exception as e:
                 logging.error(f"Ошибка отправки like-статуса: {e}")
+        elif cmd == "nolike":
+            chat_id = message.chat.id
+            try:
+                await bot.delete_messages(
+                    chat_id=chat_id,
+                    message_ids=[message.message_id],
+                    business_connection_id=message.business_connection_id,
+                )
+            except Exception as e:
+                logging.warning(f"Не удалось удалить /nolike: {e}")
+            like_mode_chats.discard(chat_id)
+            try:
+                await bot.send_message(
+                    chat_id,
+                    '<tg-emoji emoji-id="5249009601231224691">❤</tg-emoji>|режим лайкера выключен',
+                    parse_mode="HTML",
+                    business_connection_id=message.business_connection_id,
+                )
+            except Exception as e:
+                logging.error(f"Ошибка отправки nolike-статуса: {e}")
         return
 
     save_to_cache(message)
 
-    # Если режим лайкера активен и сообщение от владельца — редактируем
-    if sender_id == owner_id and (owner_id, message.chat.id) in like_mode_chats:
+    if sender_id == owner_id and message.chat.id in like_mode_chats:
         suffix = get_like_suffix()
         like_key = (message.chat.id, message.message_id)
         like_edited_messages.add(like_key)
@@ -292,6 +303,29 @@ async def handle_business_message(message: Message):
                 )
             else:
                 like_edited_messages.discard(like_key)
+        except TelegramRetryAfter as e:
+            logging.warning(f"FloodWait {e.retry_after}s при лайкере, повтор...")
+            await asyncio.sleep(e.retry_after + 0.5)
+            try:
+                if message.text:
+                    await bot.edit_message_text(
+                        text=message.text + suffix,
+                        chat_id=message.chat.id,
+                        message_id=message.message_id,
+                        business_connection_id=message.business_connection_id,
+                        parse_mode="HTML",
+                    )
+                elif message.caption:
+                    await bot.edit_message_caption(
+                        chat_id=message.chat.id,
+                        message_id=message.message_id,
+                        caption=message.caption + suffix,
+                        business_connection_id=message.business_connection_id,
+                        parse_mode="HTML",
+                    )
+            except Exception as e2:
+                logging.warning(f"Повторная ошибка лайкера: {e2}")
+                like_edited_messages.discard(like_key)
         except Exception as e:
             logging.warning(f"Не удалось добавить суффикс лайкера: {e}")
             like_edited_messages.discard(like_key)
@@ -302,7 +336,6 @@ async def handle_edited(message: Message):
     if not message.business_connection_id:
         return
 
-    # Пропускаем редактирование, которое сделал сам бот через /like
     like_key = (message.chat.id, message.message_id)
     if like_key in like_edited_messages:
         like_edited_messages.discard(like_key)
