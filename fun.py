@@ -3,6 +3,7 @@ import logging
 import random
 from aiogram import Bot
 from aiogram.types import Message, MessageEntity
+from aiogram.exceptions import TelegramRetryAfter
 
 
 spam_running: dict[int, bool] = {}
@@ -148,6 +149,8 @@ async def cmd_spam(message: Message, bot: Bot):
                     business_connection_id=message.business_connection_id,
                 )
                 await asyncio.sleep(0.35)
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after + 0.5)
             except Exception as e:
                 logging.error(f"Ошибка спама: {e}")
                 break
