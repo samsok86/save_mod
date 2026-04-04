@@ -36,6 +36,8 @@ stats: dict[str, int] = {"deleted": 0, "edited": 0, "connections": 0}
 like_mode_chats: set[int] = set()
 like_edited_messages: set[tuple[int, int]] = set()
 
+processed_commands: set[tuple[int, int]] = set()
+
 
 async def cache_cleanup_task():
     while True:
@@ -76,6 +78,11 @@ def get_command(text: str) -> str:
         return ""
     word = text.split()[0]
     return word.lstrip("/").split("@")[0].lower()
+
+
+def is_bot_sent(message: Message) -> bool:
+    """Возвращает True если это сообщение отправил сам бот через business_connection_id."""
+    return bool(getattr(message, "sender_business_bot", None))
 
 
 async def resolve_owner(business_connection_id: str) -> int:
@@ -230,6 +237,14 @@ async def handle_business_message(message: Message):
         if sender_id != owner_id:
             save_to_cache(message)
             return
+
+        cmd_key = (message.chat.id, message.message_id)
+        if cmd_key in processed_commands:
+            return
+        processed_commands.add(cmd_key)
+        if len(processed_commands) > 500:
+            processed_commands.clear()
+
         if cmd == "spam":
             await cmd_spam(message, bot)
         elif cmd == "fuck":
@@ -267,6 +282,9 @@ async def handle_business_message(message: Message):
             except Exception as e:
                 logging.warning(f"Не удалось удалить /nolike: {e}")
             like_mode_chats.discard(chat_id)
+            # Очищаем все pending-правки для этого чата
+            stale = {(cid, mid) for (cid, mid) in like_edited_messages if cid == chat_id}
+            like_edited_messages.difference_update(stale)
             try:
                 await bot.send_message(
                     chat_id,
@@ -280,7 +298,20 @@ async def handle_business_message(message: Message):
 
     save_to_cache(message)
 
-    if sender_id == owner_id and message.chat.id in like_mode_chats:
+    # Пропускаем сообщения отправленные самим ботом (статусные и прочие)
+    if is_bot_sent(message):
+        return
+
+    # Лайкер: только для исходящих сообщений владельца, не от бота
+    if (
+        sender_id is not None
+        and sender_id == owner_id
+        and message.chat.id in like_mode_chats
+    ):
+        # Финальная проверка перед редактированием
+        if message.chat.id not in like_mode_chats:
+            return
+
         suffix = get_like_suffix()
         like_key = (message.chat.id, message.message_id)
         like_edited_messages.add(like_key)
@@ -342,20 +373,22 @@ async def handle_edited(message: Message):
         save_to_cache(message)
         return
 
+    # Пропускаем правки от самого бота
+    if is_bot_sent(message):
+        save_to_cache(message)
+        return
+
     owner_id = await resolve_owner(message.business_connection_id)
 
     if owner_id in banned_users:
         return
 
     cid = message.chat.id
-    old_text = ""
     old_msg = get_cached_message(cid, message.message_id)
-    if old_msg:
-        old_text = old_msg.text or old_msg.caption or ""
-
+    old_text = (old_msg.text or old_msg.caption or "") if old_msg else ""
     new_text = message.text or message.caption or ""
 
-    if (old_text or new_text) and old_text != new_text:
+    if old_msg and old_text != new_text:
         stats["edited"] += 1
         name, uid = build_sender_info(message)
         edited_html = (
