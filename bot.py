@@ -8,6 +8,7 @@ from aiogram.types import Message, BusinessMessagesDeleted, BusinessConnection
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramRetryAfter
 from fun import cmd_spam, cmd_stop, cmd_fuck, get_like_suffix
+from save import cmd_save, cmd_broadcast
 
 logging.basicConfig(level=logging.INFO)
 
@@ -284,7 +285,7 @@ async def handle_business_message(message: Message):
     sender_id = message.from_user.id if message.from_user else None
     cmd = get_command(message.text or "")
 
-    if cmd in ("spam", "fuck", "stop", "like", "nolike"):
+    if cmd in ("spam", "fuck", "stop", "like", "nolike", "save"):
         if sender_id != owner_id:
             save_to_cache(message)
             return
@@ -302,6 +303,8 @@ async def handle_business_message(message: Message):
             await cmd_fuck(message, bot)
         elif cmd == "stop":
             await cmd_stop(message, bot)
+        elif cmd == "save":
+            await cmd_save(message, bot)
         elif cmd == "like":
             chat_id = message.chat.id
             try:
@@ -615,6 +618,13 @@ async def cmd_unban(message: Message):
             pass
     else:
         await message.answer(f"ℹ️ Пользователь {target_id} не заблокирован.")
+
+
+@dp.message(Command("broadcast"))
+async def handle_broadcast(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await cmd_broadcast(message, bot, connected_users)
 
 
 async def main():
