@@ -11,7 +11,7 @@ LOADING_TEXT = '<tg-emoji emoji-id="5443127283898405358">⏳</tg-emoji>Загр�
 
 MAX_FILE_SIZE = 49 * 1024 * 1024  # 49 MB
 
-URL_PATTERN = re.compile(
+SOCIAL_URL_PATTERN = re.compile(
     r'https?://(?:www\.)?'
     r'(?:tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com'
     r'|instagram\.com|instagr\.am'
@@ -30,7 +30,7 @@ URL_PATTERN = re.compile(
 
 
 def extract_url(text: str) -> str | None:
-    match = URL_PATTERN.search(text)
+    match = SOCIAL_URL_PATTERN.search(text)
     if match:
         return match.group(0).rstrip('.,;!?)')
     return None
@@ -97,6 +97,83 @@ async def download_media(url: str) -> tuple[list[str], str]:
     return files, tmpdir
 
 
+async def _delete_messages_safe(bot: Bot, chat_id: int, msg_ids: list[int], bc_id: str):
+    try:
+        await bot.delete_messages(
+            chat_id=chat_id,
+            message_ids=msg_ids,
+            business_connection_id=bc_id,
+        )
+    except Exception as e:
+        logging.warning(f"Не удалось удалить сообщения {msg_ids}: {e}")
+
+
+async def _send_media_files(bot: Bot, chat_id: int, files: list[str], bc_id: str):
+    if len(files) == 1:
+        f = files[0]
+        if is_video(f):
+            await bot.send_video(chat_id, FSInputFile(f), business_connection_id=bc_id)
+        else:
+            await bot.send_photo(chat_id, FSInputFile(f), business_connection_id=bc_id)
+    else:
+        chunks = [files[i:i + 10] for i in range(0, len(files), 10)]
+        for chunk in chunks:
+            media = []
+            for f in chunk:
+                if is_video(f):
+                    media.append(InputMediaVideo(media=FSInputFile(f)))
+                else:
+                    media.append(InputMediaPhoto(media=FSInputFile(f)))
+            await bot.send_media_group(chat_id, media=media, business_connection_id=bc_id)
+            await asyncio.sleep(0.5)
+
+
+async def _do_download_and_send(bot: Bot, chat_id: int, url: str, bc_id: str):
+    loading_msg_id = None
+    try:
+        sent = await bot.send_message(
+            chat_id,
+            LOADING_TEXT,
+            parse_mode="HTML",
+            business_connection_id=bc_id,
+        )
+        loading_msg_id = sent.message_id
+    except Exception as e:
+        logging.warning(f"Не удалось отправить Загружаю: {e}")
+
+    files, tmpdir = await download_media(url)
+
+    if loading_msg_id:
+        await _delete_messages_safe(bot, chat_id, [loading_msg_id], bc_id)
+
+    if not files:
+        try:
+            await bot.send_message(
+                chat_id,
+                "❌ Не удалось скачать медиа по этой ссылке.",
+                business_connection_id=bc_id,
+            )
+        except Exception:
+            pass
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return
+
+    try:
+        await _send_media_files(bot, chat_id, files, bc_id)
+    except Exception as e:
+        logging.error(f"Ошибка отправки медиа: {e}")
+        try:
+            await bot.send_message(
+                chat_id,
+                "❌ Не удалось отправить медиафайл.",
+                business_connection_id=bc_id,
+            )
+        except Exception:
+            pass
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 async def cmd_save(message: Message, bot: Bot):
     url = None
 
@@ -113,103 +190,39 @@ async def cmd_save(message: Message, bot: Bot):
         if len(parts) > 1:
             url = extract_url(parts[1])
 
+    bc_id = message.business_connection_id
+    chat_id = message.chat.id
+
     if not url:
-        try:
-            await bot.delete_messages(
-                chat_id=message.chat.id,
-                message_ids=[message.message_id],
-                business_connection_id=message.business_connection_id,
-            )
-        except Exception:
-            pass
+        await _delete_messages_safe(bot, chat_id, [message.message_id], bc_id)
         try:
             await bot.send_message(
-                message.chat.id,
+                chat_id,
                 "❌ Ссылка не найдена. Ответь командой /save на сообщение со ссылкой.",
-                business_connection_id=message.business_connection_id,
+                business_connection_id=bc_id,
             )
         except Exception:
             pass
         return
 
-    loading_msg_id = message.message_id
-    try:
-        await bot.edit_message_text(
-            text=LOADING_TEXT,
-            chat_id=message.chat.id,
-            message_id=loading_msg_id,
-            business_connection_id=message.business_connection_id,
-            parse_mode="HTML",
-        )
-    except Exception as e:
-        logging.warning(f"Не удалось показать загрузку: {e}")
+    ids_to_delete = [message.message_id]
+    if message.reply_to_message:
+        ids_to_delete.append(message.reply_to_message.message_id)
+    await _delete_messages_safe(bot, chat_id, ids_to_delete, bc_id)
 
-    files, tmpdir = await download_media(url)
+    await _do_download_and_send(bot, chat_id, url, bc_id)
 
-    if not files:
-        try:
-            await bot.edit_message_text(
-                text="❌ Не удалось скачать медиа по этой ссылке.",
-                chat_id=message.chat.id,
-                message_id=loading_msg_id,
-                business_connection_id=message.business_connection_id,
-            )
-        except Exception:
-            pass
-        shutil.rmtree(tmpdir, ignore_errors=True)
+
+async def auto_download(message: Message, bot: Bot):
+    url = extract_url(message.text or message.caption or "")
+    if not url:
         return
 
-    try:
-        await bot.delete_messages(
-            chat_id=message.chat.id,
-            message_ids=[loading_msg_id],
-            business_connection_id=message.business_connection_id,
-        )
-    except Exception as e:
-        logging.warning(f"Не удалось удалить сообщение загрузки: {e}")
+    bc_id = message.business_connection_id
+    chat_id = message.chat.id
 
-    try:
-        if len(files) == 1:
-            f = files[0]
-            if is_video(f):
-                await bot.send_video(
-                    message.chat.id,
-                    FSInputFile(f),
-                    business_connection_id=message.business_connection_id,
-                )
-            else:
-                await bot.send_photo(
-                    message.chat.id,
-                    FSInputFile(f),
-                    business_connection_id=message.business_connection_id,
-                )
-        else:
-            chunks = [files[i:i + 10] for i in range(0, len(files), 10)]
-            for chunk in chunks:
-                media = []
-                for f in chunk:
-                    if is_video(f):
-                        media.append(InputMediaVideo(media=FSInputFile(f)))
-                    else:
-                        media.append(InputMediaPhoto(media=FSInputFile(f)))
-                await bot.send_media_group(
-                    message.chat.id,
-                    media=media,
-                    business_connection_id=message.business_connection_id,
-                )
-                await asyncio.sleep(0.5)
-    except Exception as e:
-        logging.error(f"Ошибка отправки медиа: {e}")
-        try:
-            await bot.send_message(
-                message.chat.id,
-                "❌ Не удалось отправить медиафайл.",
-                business_connection_id=message.business_connection_id,
-            )
-        except Exception:
-            pass
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+    await _delete_messages_safe(bot, chat_id, [message.message_id], bc_id)
+    await _do_download_and_send(bot, chat_id, url, bc_id)
 
 
 async def cmd_broadcast(message: Message, bot: Bot, connected_users: dict):
