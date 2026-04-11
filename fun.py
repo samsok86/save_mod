@@ -158,38 +158,17 @@ async def cmd_spam(message: Message, bot: Bot):
         spam_running[chat_id] = False
 
 
-async def cmd_stop(message: Message, bot: Bot):
-    chat_id = message.chat.id
-    await delete_command(message, bot)
-    if spam_running.get(chat_id, False):
-        spam_running[chat_id] = False
-        try:
-            await bot.send_message(
-                chat_id,
-                "⛔ Спам остановлен.",
-                business_connection_id=message.business_connection_id,
-            )
-        except Exception as e:
-            logging.warning(f"Ошибка /stop: {e}")
-    else:
-        try:
-            await bot.send_message(
-                chat_id,
-                "ℹ️ Нет активного спама.",
-                business_connection_id=message.business_connection_id,
-            )
-        except Exception as e:
-            logging.warning(f"Ошибка /stop: {e}")
-
-
 async def cmd_fuck(message: Message, bot: Bot):
     sender_name = get_display_name(message.from_user)
 
-    chat = message.chat
-    if chat.id != (message.from_user.id if message.from_user else None):
-        partner_name = get_display_name(chat)
+    if message.reply_to_message and message.reply_to_message.from_user:
+        partner_name = get_display_name(message.reply_to_message.from_user)
     else:
-        partner_name = "собеседника"
+        chat = message.chat
+        if chat.id != (message.from_user.id if message.from_user else None):
+            partner_name = get_display_name(chat)
+        else:
+            partner_name = "собеседника"
 
     await delete_command(message, bot)
 
