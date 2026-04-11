@@ -7,8 +7,12 @@ from aiogram import Bot, Dispatcher
 from aiogram.types import Message, BusinessMessagesDeleted, BusinessConnection
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramRetryAfter
-from fun import cmd_spam, cmd_stop, cmd_fuck, get_like_suffix
+from fun import cmd_spam, cmd_fuck, get_like_suffix, spam_running
 from save import cmd_save, cmd_broadcast, auto_download, extract_url
+from cmds import (
+    cmd_kick, cmd_shot, cmd_commands, cmd_id,
+    cmd_mother, mother_running, mother_active_chats, set_mother_reaction,
+)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -284,7 +288,7 @@ async def handle_business_message(message: Message):
     sender_id = message.from_user.id if message.from_user else None
     cmd = get_command(message.text or "")
 
-    if cmd in ("spam", "fuck", "stop", "like", "nolike", "save"):
+    if cmd in ("spam", "fuck", "stop", "like", "nolike", "save", "kick", "shot", "id", "mother"):
         if sender_id != owner_id:
             save_to_cache(message)
             return
@@ -301,9 +305,48 @@ async def handle_business_message(message: Message):
         elif cmd == "fuck":
             await cmd_fuck(message, bot)
         elif cmd == "stop":
-            await cmd_stop(message, bot)
+            chat_id = message.chat.id
+            stopped = False
+            if spam_running.get(chat_id, False):
+                spam_running[chat_id] = False
+                stopped = True
+            if mother_running.get(chat_id, False):
+                mother_running[chat_id] = False
+                mother_active_chats.discard(chat_id)
+                stopped = True
+            try:
+                await bot.delete_messages(
+                    chat_id=chat_id,
+                    message_ids=[message.message_id],
+                    business_connection_id=message.business_connection_id,
+                )
+            except Exception as e:
+                logging.warning(f"Не удалось удалить /stop: {e}")
+            try:
+                if stopped:
+                    await bot.send_message(
+                        chat_id,
+                        "⛔ Остановлено.",
+                        business_connection_id=message.business_connection_id,
+                    )
+                else:
+                    await bot.send_message(
+                        chat_id,
+                        "ℹ️ Нет активного процесса.",
+                        business_connection_id=message.business_connection_id,
+                    )
+            except Exception as e:
+                logging.warning(f"Ошибка /stop: {e}")
         elif cmd == "save":
             await cmd_save(message, bot)
+        elif cmd == "kick":
+            await cmd_kick(message, bot)
+        elif cmd == "shot":
+            await cmd_shot(message, bot)
+        elif cmd == "id":
+            await cmd_id(message, bot)
+        elif cmd == "mother":
+            await cmd_mother(message, bot)
         elif cmd == "like":
             chat_id = message.chat.id
             try:
@@ -353,17 +396,17 @@ async def handle_business_message(message: Message):
     if is_bot_sent(message):
         return
 
-    # Автоматическое скачивание по ссылке на соц. сеть
+    if sender_id != owner_id and message.chat.id in mother_active_chats:
+        asyncio.create_task(set_mother_reaction(bot, message))
+
     msg_text = message.text or message.caption or ""
     if extract_url(msg_text):
         await auto_download(message, bot)
         return
 
-    # Тихая пересылка медиа/голосовых только владельцу (только входящие от других)
     if sender_id != owner_id and has_media(message):
         await forward_media_silent(owner_id, message)
 
-    # Лайкер: только для исходящих сообщений владельца, не от бота
     if (
         sender_id is not None
         and sender_id == owner_id
@@ -528,6 +571,11 @@ START_TEXT = (
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     await message.answer(START_TEXT, parse_mode="HTML")
+
+
+@dp.message(Command("commands"))
+async def handle_commands(message: Message):
+    await cmd_commands(message)
 
 
 @dp.message(Command("users"))
