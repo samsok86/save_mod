@@ -128,6 +128,15 @@ async def _send_media_files(bot: Bot, chat_id: int, files: list[str], bc_id: str
             await asyncio.sleep(0.5)
 
 
+async def _send_temp_error(bot: Bot, chat_id: int, text: str, bc_id: str, delay: float = 5.0):
+    try:
+        sent = await bot.send_message(chat_id, text, business_connection_id=bc_id)
+        await asyncio.sleep(delay)
+        await _delete_messages_safe(bot, chat_id, [sent.message_id], bc_id)
+    except Exception as e:
+        logging.warning(f"Ошибка временного сообщения об ошибке: {e}")
+
+
 async def _do_download_and_send(bot: Bot, chat_id: int, url: str, bc_id: str):
     loading_msg_id = None
     try:
@@ -147,14 +156,7 @@ async def _do_download_and_send(bot: Bot, chat_id: int, url: str, bc_id: str):
         await _delete_messages_safe(bot, chat_id, [loading_msg_id], bc_id)
 
     if not files:
-        try:
-            await bot.send_message(
-                chat_id,
-                "❌ Не удалось скачать медиа по этой ссылке.",
-                business_connection_id=bc_id,
-            )
-        except Exception:
-            pass
+        await _send_temp_error(bot, chat_id, "❌ Не удалось скачать медиа по этой ссылке.", bc_id)
         shutil.rmtree(tmpdir, ignore_errors=True)
         return
 
@@ -162,14 +164,7 @@ async def _do_download_and_send(bot: Bot, chat_id: int, url: str, bc_id: str):
         await _send_media_files(bot, chat_id, files, bc_id)
     except Exception as e:
         logging.error(f"Ошибка отправки медиа: {e}")
-        try:
-            await bot.send_message(
-                chat_id,
-                "❌ Не удалось отправить медиафайл.",
-                business_connection_id=bc_id,
-            )
-        except Exception:
-            pass
+        await _send_temp_error(bot, chat_id, "❌ Не удалось отправить медиафайл.", bc_id)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -195,14 +190,11 @@ async def cmd_save(message: Message, bot: Bot):
 
     if not url:
         await _delete_messages_safe(bot, chat_id, [message.message_id], bc_id)
-        try:
-            await bot.send_message(
-                chat_id,
-                "❌ Ссылка не найдена. Ответь командой /save на сообщение со ссылкой.",
-                business_connection_id=bc_id,
-            )
-        except Exception:
-            pass
+        await _send_temp_error(
+            bot, chat_id,
+            "❌ Ссылка не найдена. Ответь командой /save на сообщение со ссылкой.",
+            bc_id,
+        )
         return
 
     ids_to_delete = [message.message_id]
